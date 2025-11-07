@@ -12,7 +12,7 @@ const client = new Client({
 });
 
 // Helper function to analyze emote usage
-async function analyzeEmoteUsage(guild, messagesToScan = 1000) {
+async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null) {
     console.log('Starting emote analysis...');
 
     // Get all custom emotes from the server
@@ -31,12 +31,17 @@ async function analyzeEmoteUsage(guild, messagesToScan = 1000) {
         });
     });
 
-    // Get all text channels in the guild
-    const channels = guild.channels.cache.filter(
-        channel => channel.type === ChannelType.GuildText
-    );
+    // Get channels to scan
+    let channels;
+    if (specificChannel) {
+        channels = new Map([[specificChannel.id, specificChannel]]);
+    } else {
+        channels = guild.channels.cache.filter(
+            channel => channel.type === ChannelType.GuildText
+        );
+    }
 
-    console.log(`Scanning ${channels.size} text channels...`);
+    console.log(`Scanning ${channels.size} text channel(s)...`);
 
     let totalMessagesScanned = 0;
     const messagesPerChannel = Math.ceil(messagesToScan / channels.size);
@@ -46,23 +51,43 @@ async function analyzeEmoteUsage(guild, messagesToScan = 1000) {
         try {
             console.log(`Fetching messages from #${channel.name}...`);
 
-            // Fetch messages (max 100 per request)
-            const messages = await channel.messages.fetch({ limit: Math.min(messagesPerChannel, 100) });
-            totalMessagesScanned += messages.size;
+            let remainingMessages = messagesPerChannel;
+            let lastMessageId = null;
 
-            // Scan each message for emote usage
-            messages.forEach(msg => {
-                // Custom emote format: <:emoteName:emoteId> or <a:emoteName:emoteId> for animated
-                const emoteRegex = /<a?:(\w+):(\d+)>/g;
-                let match;
+            // Fetch messages in batches of 100 (Discord API limit)
+            while (remainingMessages > 0) {
+                const fetchLimit = Math.min(remainingMessages, 100);
+                const fetchOptions = { limit: fetchLimit };
 
-                while ((match = emoteRegex.exec(msg.content)) !== null) {
-                    const emoteId = match[2];
-                    if (emoteUsage.has(emoteId)) {
-                        emoteUsage.get(emoteId).count++;
-                    }
+                if (lastMessageId) {
+                    fetchOptions.before = lastMessageId;
                 }
-            });
+
+                const messages = await channel.messages.fetch(fetchOptions);
+
+                if (messages.size === 0) break; // No more messages in channel
+
+                totalMessagesScanned += messages.size;
+                remainingMessages -= messages.size;
+                lastMessageId = messages.last().id;
+
+                // Scan each message for emote usage
+                messages.forEach(msg => {
+                    // Custom emote format: <:emoteName:emoteId> or <a:emoteName:emoteId> for animated
+                    const emoteRegex = /<a?:(\w+):(\d+)>/g;
+                    let match;
+
+                    while ((match = emoteRegex.exec(msg.content)) !== null) {
+                        const emoteId = match[2];
+                        if (emoteUsage.has(emoteId)) {
+                            emoteUsage.get(emoteId).count++;
+                        }
+                    }
+                });
+
+                // If we got fewer messages than requested, we've reached the end
+                if (messages.size < fetchLimit) break;
+            }
         } catch (error) {
             console.log(`Could not fetch messages from #${channel.name}: ${error.message}`);
         }
@@ -77,7 +102,8 @@ async function analyzeEmoteUsage(guild, messagesToScan = 1000) {
     return {
         emotes: sortedEmotes,
         totalMessagesScanned,
-        totalEmotes: guildEmotes.size
+        totalEmotes: guildEmotes.size,
+        channelCount: channels.size
     };
 }
 
@@ -87,36 +113,54 @@ client.once('ready', () => {
     console.log(`Bot is ready and online!`);
 });
 
-// Listen for messages
-client.on('messageCreate', async (message) => {
-    // Ignore messages from bots
-    if (message.author.bot) return;
+// Listen for slash commands
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
 
-    // Simple ping command
-    if (message.content === '!ping') {
-        await message.reply('Pong!');
-    }
+    const { commandName } = interaction;
 
-    // Simple hello command
-    if (message.content === '!hello') {
-        await message.reply(`Hello ${message.author.username}!`);
-    }
+    if (commandName === 'ping') {
+        await interaction.reply('Pong!');
+    } else if (commandName === 'hello') {
+        await interaction.reply(`Hello ${interaction.user.username}!`);
+    } else if (commandName === 'emote-stats') {
+        // Get options (with defaults)
+        const messagesToScan = interaction.options.getInteger('messages') || 10000;
+        const specificChannel = interaction.options.getChannel('channel');
+        const showTop = interaction.options.getInteger('show_top') || 5;
 
-    // Emote statistics command
-    if (message.content === '!emote-stats') {
-        await message.reply('Analyzing emote usage... This may take a moment!');
+        // Build initial response message
+        let initialMsg = 'Analyzing emote usage... This may take a moment!\n';
+        initialMsg += `Scanning up to ${messagesToScan.toLocaleString()} messages`;
+        if (specificChannel) {
+            initialMsg += ` in ${specificChannel}`;
+        } else {
+            initialMsg += ' across all channels';
+        }
+        initialMsg += '...';
+
+        await interaction.reply(initialMsg);
 
         try {
-            const results = await analyzeEmoteUsage(message.guild);
+            const results = await analyzeEmoteUsage(
+                interaction.guild,
+                messagesToScan,
+                specificChannel
+            );
 
-            // Get top 5 least used emotes
-            const leastUsed = results.emotes.slice(0, 5);
+            // Get least used emotes
+            const leastUsed = results.emotes.slice(0, showTop);
 
             // Build response message
             let response = `**Emote Usage Analysis**\n`;
-            response += `Scanned ${results.totalMessagesScanned} messages\n`;
-            response += `Total emotes in server: ${results.totalEmotes}\n\n`;
-            response += `**Top 5 LEAST Used Emotes:**\n`;
+            response += `Scanned ${results.totalMessagesScanned.toLocaleString()} messages`;
+            if (specificChannel) {
+                response += ` in ${specificChannel}`;
+            } else {
+                response += ` across ${results.channelCount} channel(s)`;
+            }
+            response += `\nTotal emotes in server: ${results.totalEmotes}\n\n`;
+            response += `**Top ${showTop} LEAST Used Emotes:**\n`;
 
             if (leastUsed.length === 0) {
                 response += 'No emotes found in this server.';
@@ -129,10 +173,10 @@ client.on('messageCreate', async (message) => {
                 });
             }
 
-            await message.reply(response);
+            await interaction.editReply(response);
         } catch (error) {
             console.error('Error analyzing emotes:', error);
-            await message.reply(`Error analyzing emotes: ${error.message}`);
+            await interaction.editReply(`Error analyzing emotes: ${error.message}`);
         }
     }
 });
