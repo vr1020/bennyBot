@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 const config = require('./config.js');
 
 // Create a new client instance
@@ -10,6 +10,13 @@ const client = new Client({
         GatewayIntentBits.GuildEmojisAndStickers,
     ]
 });
+
+// Rate limiting: Track active analysis operations per guild
+const activeAnalysis = new Map(); // guildId -> { userId, startTime }
+
+// Cooldown tracking: Prevent spam (per user per guild)
+const cooldowns = new Map(); // `${guildId}-${userId}` -> timestamp
+const COOLDOWN_TIME = 30000; // 30 seconds between commands per user
 
 // Helper function to analyze emote usage
 async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null) {
@@ -63,30 +70,48 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
                     fetchOptions.before = lastMessageId;
                 }
 
-                const messages = await channel.messages.fetch(fetchOptions);
+                try {
+                    const messages = await channel.messages.fetch(fetchOptions);
 
-                if (messages.size === 0) break; // No more messages in channel
+                    if (messages.size === 0) break; // No more messages in channel
 
-                totalMessagesScanned += messages.size;
-                remainingMessages -= messages.size;
-                lastMessageId = messages.last().id;
+                    totalMessagesScanned += messages.size;
+                    remainingMessages -= messages.size;
+                    lastMessageId = messages.last().id;
 
-                // Scan each message for emote usage
-                messages.forEach(msg => {
-                    // Custom emote format: <:emoteName:emoteId> or <a:emoteName:emoteId> for animated
-                    const emoteRegex = /<a?:(\w+):(\d+)>/g;
-                    let match;
+                    // Scan each message for emote usage
+                    messages.forEach(msg => {
+                        // Custom emote format: <:emoteName:emoteId> or <a:emoteName:emoteId> for animated
+                        const emoteRegex = /<a?:(\w+):(\d+)>/g;
+                        let match;
 
-                    while ((match = emoteRegex.exec(msg.content)) !== null) {
-                        const emoteId = match[2];
-                        if (emoteUsage.has(emoteId)) {
-                            emoteUsage.get(emoteId).count++;
+                        while ((match = emoteRegex.exec(msg.content)) !== null) {
+                            const emoteId = match[2];
+                            if (emoteUsage.has(emoteId)) {
+                                emoteUsage.get(emoteId).count++;
+                            }
                         }
-                    }
-                });
+                    });
 
-                // If we got fewer messages than requested, we've reached the end
-                if (messages.size < fetchLimit) break;
+                    // If we got fewer messages than requested, we've reached the end
+                    if (messages.size < fetchLimit) break;
+
+                    // Small delay to avoid hitting rate limits too hard (only if fetching more)
+                    if (remainingMessages > 0) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                } catch (fetchError) {
+                    // Handle rate limiting with exponential backoff
+                    if (fetchError.code === 429) {
+                        const retryAfter = fetchError.retry_after || 1;
+                        console.log(`Rate limited on #${channel.name}, waiting ${retryAfter}s...`);
+                        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+                        continue;
+                    } else {
+                        console.log(`Error fetching batch from #${channel.name}: ${fetchError.message}`);
+                        break;
+                    }
+                }
             }
         } catch (error) {
             console.log(`Could not fetch messages from #${channel.name}: ${error.message}`);
@@ -124,10 +149,55 @@ client.on('interactionCreate', async (interaction) => {
     } else if (commandName === 'hello') {
         await interaction.reply(`Hello ${interaction.user.username}!`);
     } else if (commandName === 'emote-stats') {
+        const guildId = interaction.guild.id;
+        const userId = interaction.user.id;
+        const cooldownKey = `${guildId}-${userId}`;
+
+        if (activeAnalysis.has(guildId)) {
+            const active = activeAnalysis.get(guildId);
+            return await interaction.reply({
+                content: `An analysis is already running in this server (started by <@${active.userId}>). Please wait for it to complete.`,
+                ephemeral: true
+            });
+        }
+
+        if (cooldowns.has(cooldownKey)) {
+            const expirationTime = cooldowns.get(cooldownKey) + COOLDOWN_TIME;
+            const timeLeft = Math.ceil((expirationTime - Date.now()) / 1000);
+
+            if (Date.now() < expirationTime) {
+                return await interaction.reply({
+                    content: `Please wait ${timeLeft} more second(s) before using this command again.`,
+                    ephemeral: true
+                });
+            }
+        }
+
         // Get options (with defaults)
         const messagesToScan = interaction.options.getInteger('messages') || 10000;
         const specificChannel = interaction.options.getChannel('channel');
         const showTop = interaction.options.getInteger('show_top') || 5;
+
+        // Permission check for large scans (>20k messages)
+        if (messagesToScan > 20000) {
+            const member = interaction.member;
+            const hasPermission = member.permissions.has(PermissionFlagsBits.ManageGuild) ||
+                                member.permissions.has(PermissionFlagsBits.Administrator);
+
+            if (!hasPermission) {
+                return await interaction.reply({
+                    content: 'Scanning more than 20,000 messages requires "Manage Server" permission to prevent abuse.',
+                    ephemeral: true
+                });
+            }
+        }
+
+        // Set cooldown
+        cooldowns.set(cooldownKey, Date.now());
+        setTimeout(() => cooldowns.delete(cooldownKey), COOLDOWN_TIME);
+
+        // Mark analysis as active
+        activeAnalysis.set(guildId, { userId, startTime: Date.now() });
 
         // Build initial response message
         let initialMsg = 'Analyzing emote usage... This may take a moment!\n';
@@ -176,7 +246,23 @@ client.on('interactionCreate', async (interaction) => {
             await interaction.editReply(response);
         } catch (error) {
             console.error('Error analyzing emotes:', error);
-            await interaction.editReply(`Error analyzing emotes: ${error.message}`);
+
+            // Handle specific Discord API errors
+            let errorMessage = 'Error analyzing emotes: ';
+            if (error.code === 50013) {
+                errorMessage += 'Missing permissions to read messages in some channels.';
+            } else if (error.code === 429) {
+                errorMessage += 'Rate limited by Discord. Please try again later.';
+            } else if (error.message.includes('time')) {
+                errorMessage += 'Operation timed out. Try scanning fewer messages or a specific channel.';
+            } else {
+                errorMessage += error.message;
+            }
+
+            await interaction.editReply(errorMessage).catch(console.error);
+        } finally {
+            // Always cleanup: Remove active analysis marker
+            activeAnalysis.delete(guildId);
         }
     }
 });
