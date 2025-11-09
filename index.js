@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 const config = require('./config.js');
+const { loadCache, saveCache, isCacheValid, getCacheAge } = require('./cacheManager.js');
 
 // Create a new client instance
 const client = new Client({
@@ -177,6 +178,7 @@ client.on('interactionCreate', async (interaction) => {
         const messagesToScan = interaction.options.getInteger('messages') || 10000;
         const specificChannel = interaction.options.getChannel('channel');
         const showTop = interaction.options.getInteger('show_top') || 5;
+        const forceRescan = interaction.options.getBoolean('rescan') || false;
 
         // Permission check for large scans (>20k messages)
         if (messagesToScan > 20000) {
@@ -192,6 +194,38 @@ client.on('interactionCreate', async (interaction) => {
             }
         }
 
+        // Check cache first (unless force rescan is requested)
+        if (!forceRescan) {
+            const cache = await loadCache(guildId);
+            if (cache && isCacheValid(cache)) {
+                console.log(`Using cached data for guild ${guildId} (age: ${getCacheAge(cache)})`);
+
+                // Return cached results
+                const results = cache.data;
+                const leastUsed = results.emotes.slice(0, showTop);
+
+                let response = `**Emote Usage Analysis** (from cache - ${getCacheAge(cache)} old)\n`;
+                response += `Scanned ${results.totalMessagesScanned.toLocaleString()} messages across ${results.channelCount} channel(s)\n`;
+                response += `Total emotes in server: ${results.totalEmotes}\n\n`;
+                response += `**Top ${showTop} LEAST Used Emotes:**\n`;
+
+                if (leastUsed.length === 0) {
+                    response += 'No emotes found in this server.';
+                } else {
+                    leastUsed.forEach((emote, index) => {
+                        const emoteDisplay = emote.animated
+                            ? `<a:${emote.name}:${emote.id}>`
+                            : `<:${emote.name}:${emote.id}>`;
+                        response += `${index + 1}. ${emoteDisplay} \`:${emote.name}:\` - Used ${emote.count} time(s)\n`;
+                    });
+                }
+
+                response += `\n*Tip: Use \`rescan:true\` to force a fresh scan*`;
+
+                return await interaction.reply(response);
+            }
+        }
+
         // Set cooldown
         cooldowns.set(cooldownKey, Date.now());
         setTimeout(() => cooldowns.delete(cooldownKey), COOLDOWN_TIME);
@@ -200,7 +234,9 @@ client.on('interactionCreate', async (interaction) => {
         activeAnalysis.set(guildId, { userId, startTime: Date.now() });
 
         // Build initial response message
-        let initialMsg = 'Analyzing emote usage... This may take a moment!\n';
+        let initialMsg = forceRescan
+            ? 'Forcing fresh scan... This may take a moment!\n'
+            : 'Analyzing emote usage... This may take a moment!\n';
         initialMsg += `Scanning up to ${messagesToScan.toLocaleString()} messages`;
         if (specificChannel) {
             initialMsg += ` in ${specificChannel}`;
@@ -217,6 +253,9 @@ client.on('interactionCreate', async (interaction) => {
                 messagesToScan,
                 specificChannel
             );
+
+            // Save results to cache
+            await saveCache(guildId, results);
 
             // Get least used emotes
             const leastUsed = results.emotes.slice(0, showTop);
