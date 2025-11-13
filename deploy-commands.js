@@ -37,6 +37,12 @@ const commands = [
                 min_value: 1,
                 max_value: 25,
             },
+            {
+                name: 'rescan',
+                type: ApplicationCommandOptionType.Boolean,
+                description: 'Force a fresh scan instead of using cached data (default: false)',
+                required: false,
+            },
         ],
     },
 ];
