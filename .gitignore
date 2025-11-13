@@ -23,3 +23,5 @@ Thumbs.db
 # Cache files
 cache/*
 !cache/README.md
+# Bot generated statistics
+emote-stats/

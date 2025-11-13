@@ -1,6 +1,8 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 const config = require('./config.js');
 const { loadCache, saveCache, isCacheValid, getCacheAge } = require('./cacheManager.js');
+const fs = require('fs').promises;
+const path = require('path');
 
 // Create a new client instance
 const client = new Client({
@@ -18,6 +20,85 @@ const activeAnalysis = new Map(); // guildId -> { userId, startTime }
 // Cooldown tracking: Prevent spam (per user per guild)
 const cooldowns = new Map(); // `${guildId}-${userId}` -> timestamp
 const COOLDOWN_TIME = 30000; // 30 seconds between commands per user
+
+// Persistent statistics configuration
+const STATS_DIR = path.join(__dirname, 'emote-stats');
+const CHECKPOINT_INTERVAL = 10000; // Save checkpoint every 10k messages
+
+// Helper function to ensure stats directory exists
+async function ensureStatsDir() {
+    try {
+        await fs.mkdir(STATS_DIR, { recursive: true });
+    } catch (error) {
+        console.error('Error creating stats directory:', error);
+    }
+}
+
+// Helper function to get stats file path for a guild
+function getStatsFilePath(guildId) {
+    return path.join(STATS_DIR, `${guildId}.json`);
+}
+
+// Helper function to load existing stats from file
+async function loadStats(guildId) {
+    try {
+        const filePath = getStatsFilePath(guildId);
+        const data = await fs.readFile(filePath, 'utf8');
+        return JSON.parse(data);
+    } catch (error) {
+        return null;
+    }
+}
+
+// Helper function to save stats to file
+async function saveStats(guildId, stats) {
+    try {
+        await ensureStatsDir();
+        const filePath = getStatsFilePath(guildId);
+        await fs.writeFile(filePath, JSON.stringify(stats, null, 2), 'utf8');
+        console.log(`Saved statistics to ${filePath}`);
+    } catch (error) {
+        console.error('Error saving stats:', error);
+        throw error;
+    }
+}
+
+// Helper function to save checkpoint during scanning
+async function saveCheckpoint(guildId, emoteUsage, totalMessagesScanned, lastMessageId, channelCount) {
+    const emoteData = Array.from(emoteUsage.values()).map(e => ({
+        name: e.name,
+        id: e.id,
+        animated: e.animated,
+        count: e.count
+    }));
+
+    const checkpoint = {
+        guildId,
+        lastUpdated: new Date().toISOString(),
+        totalMessagesScanned,
+        lastMessageId,
+        channelCount,
+        emoteData
+    };
+
+    await saveStats(guildId, checkpoint);
+}
+
+// Helper function to delete stats file
+async function deleteStats(guildId) {
+    try {
+        const filePath = getStatsFilePath(guildId);
+        await fs.unlink(filePath);
+        console.log(`Deleted statistics file for guild ${guildId}`);
+        return true;
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            // File doesn't exist, that's fine
+            return false;
+        }
+        throw error;
+    }
+}
 
 // Helper function to analyze emote usage
 async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null) {
