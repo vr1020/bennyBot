@@ -11,6 +11,10 @@ const commands = [
         description: 'Greets you!',
     },
     {
+        name: 'emote-stats-reset',
+        description: 'Clear saved emote statistics and start fresh',
+    },
+    {
         name: 'emote-stats',
         description: 'Analyze custom emote usage in the server',
         options: [

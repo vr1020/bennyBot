@@ -230,6 +230,43 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply('Pong!');
     } else if (commandName === 'hello') {
         await interaction.reply(`Hello ${interaction.user.username}!`);
+    } else if (commandName === 'emote-stats-reset') {
+        const guildId = interaction.guild.id;
+
+        // Check if user has permission to reset stats
+        const member = interaction.member;
+        const hasPermission = member.permissions.has(PermissionFlagsBits.ManageGuild) ||
+                            member.permissions.has(PermissionFlagsBits.Administrator);
+
+        if (!hasPermission) {
+            return await interaction.reply({
+                content: 'Resetting statistics requires "Manage Server" permission.',
+                ephemeral: true
+            });
+        }
+
+        try {
+            const existingStats = await loadStats(guildId);
+            const hadStats = await deleteStats(guildId);
+
+            if (hadStats) {
+                let response = '**Statistics Reset**\n';
+                response += `Cleared previous scan of ${existingStats.totalMessagesScanned.toLocaleString()} messages.\n`;
+                response += 'Next `/emote-stats` command will start fresh.';
+                await interaction.reply(response);
+            } else {
+                await interaction.reply({
+                    content: 'No existing statistics found. Already starting fresh!',
+                    ephemeral: true
+                });
+            }
+        } catch (error) {
+            console.error('Error resetting stats:', error);
+            await interaction.reply({
+                content: 'Error resetting statistics. Please try again.',
+                ephemeral: true
+            });
+        }
     } else if (commandName === 'emote-stats') {
         const guildId = interaction.guild.id;
         const userId = interaction.user.id;
