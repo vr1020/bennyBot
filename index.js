@@ -99,6 +99,65 @@ async function deleteStats(guildId) {
     }
 }
 
+// Helper function to parse date string to Discord snowflake ID
+function parseDateToSnowflake(dateString) {
+    // Support multiple date formats: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY
+    let dateMatch;
+    let year, month, day;
+
+    // Try YYYY-MM-DD format first
+    dateMatch = dateString.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (dateMatch) {
+        [, year, month, day] = dateMatch;
+    } else {
+        // Try DD/MM/YYYY or DD-MM-YYYY format
+        dateMatch = dateString.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+        if (dateMatch) {
+            [, day, month, year] = dateMatch;
+        }
+    }
+
+    if (!dateMatch) {
+        throw new Error('Invalid date format. Use YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY');
+    }
+
+    year = parseInt(year, 10);
+    month = parseInt(month, 10);
+    day = parseInt(day, 10);
+
+    if (month < 1 || month > 12) {
+        throw new Error('Month must be between 1 and 12');
+    }
+    if (day < 1 || day > 31) {
+        throw new Error('Day must be between 1 and 31');
+    }
+
+    const date = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+
+    // Validate
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+        throw new Error('Invalid date (day does not exist in that month)');
+    }
+
+    // Convert to Discord snowflake
+    // Discord epoch: January 1, 2015 00:00:00 UTC
+    // e.g. Convert the date to a snowflake that represents "the earliest message ID that could exist on Jan 1, 2024"
+    const DISCORD_EPOCH = 1420070400000;
+    const timestamp = date.getTime() - DISCORD_EPOCH;
+
+    if (timestamp < 0) {
+        throw new Error('Date must be after January 1, 2015 (Discord launch date)');
+    }
+
+    // Snowflake format: timestamp (ms since Discord epoch) * 2^22
+    // Multiplying by 4194304 (2^22) places the timestamp in bits 63-22,
+    // with the lower 22 bits set to 0, giving us the earliest possible
+    // snowflake ID for that timestamp
+    const snowflake = (BigInt(timestamp) * 4194304n).toString();
+
+    return snowflake;
+}
+
 // Helper function to analyze emote usage
 async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null, persist = false) {
     console.log('Starting emote analysis...');
