@@ -11,16 +11,19 @@ const commands = [
         description: 'Greets you!',
     },
     {
+        name: 'emote-stats-reset',
+        description: 'Clear saved emote statistics and start fresh',
+    },
+    {
         name: 'emote-stats',
         description: 'Analyze custom emote usage in the server',
         options: [
             {
                 name: 'messages',
                 type: ApplicationCommandOptionType.Integer,
-                description: 'Number of messages to scan (default: 10000, max: 50000)',
+                description: 'Number of messages to scan (default: 10000, no max with persist:true)',
                 required: false,
                 min_value: 100,
-                max_value: 50000,
             },
             {
                 name: 'channel',
@@ -35,12 +38,19 @@ const commands = [
                 description: 'Number of least-used emotes to show (default: 5)',
                 required: false,
                 min_value: 1,
-                max_value: 25,
+                max_value: 50,
             },
             {
-                name: 'rescan',
+                name: 'min_usage',
+                type: ApplicationCommandOptionType.Integer,
+                description: 'Only show emotes used at least this many times (default: 0)',
+                required: false,
+                min_value: 0,
+            },
+            {
+                name: 'persist',
                 type: ApplicationCommandOptionType.Boolean,
-                description: 'Force a fresh scan instead of using cached data (default: false)',
+                description: 'Save results and continue from last scan (default: false)',
                 required: false,
             },
         ],
