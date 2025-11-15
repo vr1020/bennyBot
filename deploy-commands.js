@@ -21,10 +21,9 @@ const commands = [
             {
                 name: 'messages',
                 type: ApplicationCommandOptionType.Integer,
-                description: 'Number of messages to scan (default: 10000, max: 50000)',
+                description: 'Number of messages to scan (default: 10000, no max with persist:true)',
                 required: false,
                 min_value: 100,
-                max_value: 50000,
             },
             {
                 name: 'channel',

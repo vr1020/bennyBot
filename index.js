@@ -1,6 +1,5 @@
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } = require('discord.js');
 const config = require('./config.js');
-const { loadCache, saveCache, isCacheValid, getCacheAge } = require('./cacheManager.js');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -293,10 +292,23 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // Get options (with defaults)
-        const messagesToScan = interaction.options.getInteger('messages') || 10000;
+        let messagesToScan = interaction.options.getInteger('messages') || 10000;
         const specificChannel = interaction.options.getChannel('channel');
         const showTop = interaction.options.getInteger('show_top') || 5;
-        const forceRescan = interaction.options.getBoolean('rescan') || false;
+        const persist = interaction.options.getBoolean('persist') || false;
+
+        // Validate message count limits
+        const MAX_TRANSIENT_SCAN = 50000;
+        const BATCH_SIZE = 50000; // Process in 50k chunks
+
+        // For non-persistent scans, enforce max limit
+        if (!persist && messagesToScan > MAX_TRANSIENT_SCAN) {
+            return await interaction.reply({
+                content: `Transient scans are limited to ${MAX_TRANSIENT_SCAN.toLocaleString()} messages.\n` +
+                        `Use \`persist:true\` to scan more messages with automatic batching.`,
+                ephemeral: true
+            });
+        }
 
         // Permission check for large scans (>20k messages)
         if (messagesToScan > 20000) {
@@ -312,38 +324,6 @@ client.on('interactionCreate', async (interaction) => {
             }
         }
 
-        // Check cache first (unless force rescan is requested)
-        if (!forceRescan) {
-            const cache = await loadCache(guildId);
-            if (cache && isCacheValid(cache)) {
-                console.log(`Using cached data for guild ${guildId} (age: ${getCacheAge(cache)})`);
-
-                // Return cached results
-                const results = cache.data;
-                const leastUsed = results.emotes.slice(0, showTop);
-
-                let response = `**Emote Usage Analysis** (from cache - ${getCacheAge(cache)} old)\n`;
-                response += `Scanned ${results.totalMessagesScanned.toLocaleString()} messages across ${results.channelCount} channel(s)\n`;
-                response += `Total emotes in server: ${results.totalEmotes}\n\n`;
-                response += `**Top ${showTop} LEAST Used Emotes:**\n`;
-
-                if (leastUsed.length === 0) {
-                    response += 'No emotes found in this server.';
-                } else {
-                    leastUsed.forEach((emote, index) => {
-                        const emoteDisplay = emote.animated
-                            ? `<a:${emote.name}:${emote.id}>`
-                            : `<:${emote.name}:${emote.id}>`;
-                        response += `${index + 1}. ${emoteDisplay} \`:${emote.name}:\` - Used ${emote.count} time(s)\n`;
-                    });
-                }
-
-                response += `\n*Tip: Use \`rescan:true\` to force a fresh scan*`;
-
-                return await interaction.reply(response);
-            }
-        }
-
         // Set cooldown
         cooldowns.set(cooldownKey, Date.now());
         setTimeout(() => cooldowns.delete(cooldownKey), COOLDOWN_TIME);
@@ -352,42 +332,94 @@ client.on('interactionCreate', async (interaction) => {
         activeAnalysis.set(guildId, { userId, startTime: Date.now() });
 
         // Build initial response message
-        let initialMsg = forceRescan
-            ? 'Forcing fresh scan... This may take a moment!\n'
-            : 'Analyzing emote usage... This may take a moment!\n';
-        initialMsg += `Scanning up to ${messagesToScan.toLocaleString()} messages`;
+        let initialMsg = 'Analyzing emote usage... This may take a moment!\n';
+
+        // Calculate batches if this is a large persistent scan
+        const totalBatches = persist ? Math.ceil(messagesToScan / BATCH_SIZE) : 1;
+        const isBatchedScan = totalBatches > 1;
+
+        if (isBatchedScan) {
+            initialMsg += `Scanning ${messagesToScan.toLocaleString()} messages in ${totalBatches} batches`;
+        } else {
+            initialMsg += `Scanning up to ${messagesToScan.toLocaleString()} messages`;
+        }
+
         if (specificChannel) {
             initialMsg += ` in ${specificChannel}`;
         } else {
             initialMsg += ' across all channels';
+        }
+        if (persist) {
+            initialMsg += '\n_Persistent mode: Stats will be saved and continued from your last scan_';
         }
         initialMsg += '...';
 
         await interaction.reply(initialMsg);
 
         try {
-            const results = await analyzeEmoteUsage(
-                interaction.guild,
-                messagesToScan,
-                specificChannel
-            );
+            let allResults = null;
+            let remainingMessages = messagesToScan;
+            let batchNumber = 0;
 
-            // Save results to cache
-            await saveCache(guildId, results);
+            // Process in batches
+            while (remainingMessages > 0) {
+                batchNumber++;
+                const batchSize = Math.min(remainingMessages, BATCH_SIZE);
+
+                if (isBatchedScan) {
+                    await interaction.editReply(
+                        initialMsg + `\n\n**Batch ${batchNumber}/${totalBatches}**: Processing ${batchSize.toLocaleString()} messages...`
+                    );
+                }
+
+                const results = await analyzeEmoteUsage(
+                    interaction.guild,
+                    batchSize,
+                    specificChannel,
+                    persist
+                );
+
+                allResults = results;
+                remainingMessages -= batchSize;
+
+                // Break if we didn't get any new messages (hit the end of history)
+                if (results.newMessagesScanned === 0) {
+                    if (isBatchedScan) {
+                        await interaction.editReply(
+                            initialMsg + `\n\n**Reached end of message history** after batch ${batchNumber}/${totalBatches}`
+                        );
+                    }
+                    break;
+                }
+            }
+
+            // Use the final results from the last batch
+            if (!allResults) {
+                throw new Error('No results from scan');
+            }
 
             // Get least used emotes
-            const leastUsed = results.emotes.slice(0, showTop);
+            const leastUsed = allResults.emotes.slice(0, showTop);
 
             // Build response message
             let response = `**Emote Usage Analysis**\n`;
-            response += `Scanned ${results.totalMessagesScanned.toLocaleString()} messages`;
+            if (isBatchedScan) {
+                response += `Completed ${batchNumber} batch(es)\n`;
+            }
+            response += `Scanned ${allResults.totalMessagesScanned.toLocaleString()} messages`;
+            if (allResults.persist && allResults.newMessagesScanned !== allResults.totalMessagesScanned) {
+                response += ` (${allResults.newMessagesScanned.toLocaleString()} new)`;
+            }
             if (specificChannel) {
                 response += ` in ${specificChannel}`;
             } else {
-                response += ` across ${results.channelCount} channel(s)`;
+                response += ` across ${allResults.channelCount} channel(s)`;
             }
-            response += `\nTotal emotes in server: ${results.totalEmotes}\n\n`;
-            response += `**Top ${showTop} LEAST Used Emotes:**\n`;
+            response += `\nTotal emotes in server: ${allResults.totalEmotes}`;
+            if (allResults.persist) {
+                response += `\n_Stats saved - run again with persist:true to scan deeper_`;
+            }
+            response += `\n\n**Top ${showTop} LEAST Used Emotes:**\n`;
 
             if (leastUsed.length === 0) {
                 response += 'No emotes found in this server.';
