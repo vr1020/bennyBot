@@ -38,7 +38,14 @@ const commands = [
                 description: 'Number of least-used emotes to show (default: 5)',
                 required: false,
                 min_value: 1,
-                max_value: 25,
+                max_value: 50,
+            },
+            {
+                name: 'min_usage',
+                type: ApplicationCommandOptionType.Integer,
+                description: 'Only show emotes used at least this many times (default: 0)',
+                required: false,
+                min_value: 0,
             },
             {
                 name: 'persist',

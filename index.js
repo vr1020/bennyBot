@@ -156,16 +156,14 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
     let totalMessagesScanned = 0;
     let newMessagesScanned = 0;
-    const messagesPerChannel = Math.ceil(messagesToScan / channels.size);
-    let globalLastMessageId = lastScannedMessageId; // Start from where we left off
+    let remainingMessages = messagesToScan; // Track total remaining messages across all channels
 
     // Scan messages in each channel
     for (const [channelId, channel] of channels) {
         try {
             console.log(`Fetching messages from #${channel.name}...`);
 
-            let remainingMessages = messagesPerChannel;
-            let lastMessageId = globalLastMessageId; // Use the saved last message ID
+            let lastMessageId = null; // Each channel has its own message history
 
             // Fetch messages in batches of 100 (Discord API limit)
             while (remainingMessages > 0) {
@@ -185,7 +183,6 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
                     totalMessagesScanned = previousMessagesScanned + newMessagesScanned;
                     remainingMessages -= messages.size;
                     lastMessageId = messages.last().id;
-                    globalLastMessageId = lastMessageId; // Update global tracker
 
                     // Scan each message for emote usage
                     messages.forEach(msg => {
@@ -203,7 +200,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     // Save checkpoint every CHECKPOINT_INTERVAL messages when in persist mode
                     if (persist && newMessagesScanned > 0 && newMessagesScanned % CHECKPOINT_INTERVAL === 0) {
-                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, globalLastMessageId, channels.size);
+                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, lastMessageId, channels.size);
                         console.log(`Checkpoint saved at ${totalMessagesScanned} messages`);
                     }
 
@@ -236,7 +233,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
     // Save final checkpoint if in persist mode
     if (persist && newMessagesScanned > 0) {
-        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, globalLastMessageId, channels.size);
+        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, null, channels.size);
         console.log(`Final checkpoint saved at ${totalMessagesScanned} messages`);
     }
 
@@ -336,7 +333,17 @@ client.on('interactionCreate', async (interaction) => {
         let messagesToScan = interaction.options.getInteger('messages') || 10000;
         const specificChannel = interaction.options.getChannel('channel');
         const showTop = interaction.options.getInteger('show_top') || 5;
-        const persist = interaction.options.getBoolean('persist') || false;
+        const minUsage = interaction.options.getInteger('min_usage') ?? 0;
+        let persist = interaction.options.getBoolean('persist') || false;
+
+        // Persist mode only works with a specific channel (not multi-channel scans)
+        if (persist && !specificChannel) {
+            return await interaction.reply({
+                content: 'Persist mode only works when scanning a specific channel.\n' +
+                        'Please specify a channel with `channel:#channel-name` or run without `persist:true`.',
+                ephemeral: true
+            });
+        }
 
         // Validate message count limits
         const MAX_TRANSIENT_SCAN = 50000;
@@ -346,7 +353,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!persist && messagesToScan > MAX_TRANSIENT_SCAN) {
             return await interaction.reply({
                 content: `Transient scans are limited to ${MAX_TRANSIENT_SCAN.toLocaleString()} messages.\n` +
-                        `Use \`persist:true\` to scan more messages with automatic batching.`,
+                        `Use \`persist:true\` with a specific channel to scan more messages.`,
                 ephemeral: true
             });
         }
@@ -439,8 +446,9 @@ client.on('interactionCreate', async (interaction) => {
                 throw new Error('No results from scan');
             }
 
-            // Get least used emotes
-            const leastUsed = allResults.emotes.slice(0, showTop);
+            // Filter by minimum usage and get least used emotes
+            const filteredEmotes = allResults.emotes.filter(emote => emote.count >= minUsage);
+            const leastUsed = filteredEmotes.slice(0, showTop);
 
             // Build response message
             let response = `**Emote Usage Analysis**\n`;
@@ -457,13 +465,18 @@ client.on('interactionCreate', async (interaction) => {
                 response += ` across ${allResults.channelCount} channel(s)`;
             }
             response += `\nTotal emotes in server: ${allResults.totalEmotes}`;
+            if (minUsage > 0) {
+                response += `\nFiltered to emotes with ≥${minUsage} use(s): ${filteredEmotes.length} emote(s)`;
+            }
             if (allResults.persist) {
                 response += `\n_Stats saved - run again with persist:true to scan deeper_`;
             }
             response += `\n\n**Top ${showTop} LEAST Used Emotes:**\n`;
 
             if (leastUsed.length === 0) {
-                response += 'No emotes found in this server.';
+                response += minUsage > 0
+                    ? `No emotes found with at least ${minUsage} use(s).`
+                    : 'No emotes found in this server.';
             } else {
                 leastUsed.forEach((emote, index) => {
                     const emoteDisplay = emote.animated
