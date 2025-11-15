@@ -41,9 +41,9 @@ const commands = [
                 max_value: 25,
             },
             {
-                name: 'rescan',
+                name: 'persist',
                 type: ApplicationCommandOptionType.Boolean,
-                description: 'Force a fresh scan instead of using cached data (default: false)',
+                description: 'Save results and continue from last scan (default: false)',
                 required: false,
             },
         ],

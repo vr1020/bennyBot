@@ -100,12 +100,26 @@ async function deleteStats(guildId) {
 }
 
 // Helper function to analyze emote usage
-async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null) {
+async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null, persist = false) {
     console.log('Starting emote analysis...');
 
     // Get all custom emotes from the server
     const guildEmotes = guild.emojis.cache;
     console.log(`Found ${guildEmotes.size} custom emotes in the server`);
+
+    // Load existing stats only if persist mode is enabled
+    let existingStats = null;
+    let lastScannedMessageId = null;
+    let previousMessagesScanned = 0;
+
+    if (persist) {
+        existingStats = await loadStats(guild.id);
+        if (existingStats) {
+            lastScannedMessageId = existingStats.lastMessageId;
+            previousMessagesScanned = existingStats.totalMessagesScanned || 0;
+            console.log(`Loaded existing stats: ${previousMessagesScanned} messages, last ID: ${lastScannedMessageId}`);
+        }
+    }
 
     // Initialize emote usage counter
     const emoteUsage = new Map();
@@ -118,6 +132,15 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
             emote: emote
         });
     });
+
+    // Restore existing counts if in persist mode
+    if (existingStats && existingStats.emoteData) {
+        existingStats.emoteData.forEach(emoteData => {
+            if (emoteUsage.has(emoteData.id)) {
+                emoteUsage.get(emoteData.id).count = emoteData.count;
+            }
+        });
+    }
 
     // Get channels to scan
     let channels;
@@ -132,7 +155,9 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     console.log(`Scanning ${channels.size} text channel(s)...`);
 
     let totalMessagesScanned = 0;
+    let newMessagesScanned = 0;
     const messagesPerChannel = Math.ceil(messagesToScan / channels.size);
+    let globalLastMessageId = lastScannedMessageId; // Start from where we left off
 
     // Scan messages in each channel
     for (const [channelId, channel] of channels) {
@@ -140,7 +165,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
             console.log(`Fetching messages from #${channel.name}...`);
 
             let remainingMessages = messagesPerChannel;
-            let lastMessageId = null;
+            let lastMessageId = globalLastMessageId; // Use the saved last message ID
 
             // Fetch messages in batches of 100 (Discord API limit)
             while (remainingMessages > 0) {
@@ -156,9 +181,11 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     if (messages.size === 0) break; // No more messages in channel
 
-                    totalMessagesScanned += messages.size;
+                    newMessagesScanned += messages.size;
+                    totalMessagesScanned = previousMessagesScanned + newMessagesScanned;
                     remainingMessages -= messages.size;
                     lastMessageId = messages.last().id;
+                    globalLastMessageId = lastMessageId; // Update global tracker
 
                     // Scan each message for emote usage
                     messages.forEach(msg => {
@@ -173,6 +200,12 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
                             }
                         }
                     });
+
+                    // Save checkpoint every CHECKPOINT_INTERVAL messages when in persist mode
+                    if (persist && newMessagesScanned > 0 && newMessagesScanned % CHECKPOINT_INTERVAL === 0) {
+                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, globalLastMessageId, channels.size);
+                        console.log(`Checkpoint saved at ${totalMessagesScanned} messages`);
+                    }
 
                     // If we got fewer messages than requested, we've reached the end
                     if (messages.size < fetchLimit) break;
@@ -199,7 +232,13 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
         }
     }
 
-    console.log(`Scanned ${totalMessagesScanned} messages total`);
+    console.log(`Scanned ${totalMessagesScanned} messages total (${newMessagesScanned} new)`);
+
+    // Save final checkpoint if in persist mode
+    if (persist && newMessagesScanned > 0) {
+        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, globalLastMessageId, channels.size);
+        console.log(`Final checkpoint saved at ${totalMessagesScanned} messages`);
+    }
 
     // Sort emotes by usage count (ascending - least used first)
     const sortedEmotes = Array.from(emoteUsage.values())
@@ -208,8 +247,10 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     return {
         emotes: sortedEmotes,
         totalMessagesScanned,
+        newMessagesScanned,
         totalEmotes: guildEmotes.size,
-        channelCount: channels.size
+        channelCount: channels.size,
+        persist
     };
 }
 
