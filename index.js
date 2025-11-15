@@ -157,13 +157,14 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     let totalMessagesScanned = 0;
     let newMessagesScanned = 0;
     let remainingMessages = messagesToScan; // Track total remaining messages across all channels
+    let globalLastMessageId = lastScannedMessageId; // Track the most recent message ID for checkpointing
 
     // Scan messages in each channel
     for (const [channelId, channel] of channels) {
         try {
             console.log(`Fetching messages from #${channel.name}...`);
 
-            let lastMessageId = null; // Each channel has its own message history
+            let lastMessageId = lastScannedMessageId; // Start from saved position in persist mode
 
             // Fetch messages in batches of 100 (Discord API limit)
             while (remainingMessages > 0) {
@@ -183,6 +184,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
                     totalMessagesScanned = previousMessagesScanned + newMessagesScanned;
                     remainingMessages -= messages.size;
                     lastMessageId = messages.last().id;
+                    globalLastMessageId = lastMessageId; // Update global tracker for checkpointing
 
                     // Scan each message for emote usage
                     messages.forEach(msg => {
@@ -200,7 +202,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     // Save checkpoint every CHECKPOINT_INTERVAL messages when in persist mode
                     if (persist && newMessagesScanned > 0 && newMessagesScanned % CHECKPOINT_INTERVAL === 0) {
-                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, lastMessageId, channels.size);
+                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, globalLastMessageId, channels.size);
                         console.log(`Checkpoint saved at ${totalMessagesScanned} messages`);
                     }
 
@@ -233,7 +235,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
     // Save final checkpoint if in persist mode
     if (persist && newMessagesScanned > 0) {
-        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, null, channels.size);
+        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, globalLastMessageId, channels.size);
         console.log(`Final checkpoint saved at ${totalMessagesScanned} messages`);
     }
 
