@@ -159,8 +159,11 @@ function parseDateToSnowflake(dateString) {
 }
 
 // Helper function to analyze emote usage
-async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null, persist = false) {
+async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null, persist = false, untilSnowflake = null) {
     console.log('Starting emote analysis...');
+
+    // Determine if this is a date-based scan
+    const isDateBased = untilSnowflake !== null;
 
     // Get all custom emotes from the server
     const guildEmotes = guild.emojis.cache;
@@ -239,14 +242,25 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     if (messages.size === 0) break; // No more messages in channel
 
-                    newMessagesScanned += messages.size;
+                    // if date based scan filter by snowflake time
+                    let filteredMessages = messages;
+                    if (isDateBased) {
+                        filteredMessages = messages.filter(msg => msg.id >= untilSnowflake);
+
+                        if (filteredMessages.size === 0) {
+                            console.log(`Reached cutoff date in #${channel.name}`);
+                            break;
+                        }
+                    }
+
+                    newMessagesScanned += filteredMessages.size;
                     totalMessagesScanned = previousMessagesScanned + newMessagesScanned;
-                    remainingMessages -= messages.size;
+                    remainingMessages -= filteredMessages.size;
                     lastMessageId = messages.last().id;
                     globalLastMessageId = lastMessageId; // Update global tracker for checkpointing
 
                     // Scan each message for emote usage
-                    messages.forEach(msg => {
+                    filteredMessages.forEach(msg => {
                         // Custom emote format: <:emoteName:emoteId> or <a:emoteName:emoteId> for animated
                         const emoteRegex = /<a?:(\w+):(\d+)>/g;
                         let match;
@@ -267,6 +281,12 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     // If we got fewer messages than requested, we've reached the end
                     if (messages.size < fetchLimit) break;
+
+                    // For date-based scans, if we got messages older than the cutoff, we're done
+                    if (isDateBased && filteredMessages.size < messages.size) {
+                        console.log(`Reached cutoff date in #${channel.name} (partial batch)`);
+                        break;
+                    }
 
                     // Small delay to avoid hitting rate limits too hard (only if fetching more)
                     if (remainingMessages > 0) {
@@ -396,6 +416,38 @@ client.on('interactionCreate', async (interaction) => {
         const showTop = interaction.options.getInteger('show_top') || 5;
         const minUsage = interaction.options.getInteger('min_usage') ?? 0;
         let persist = interaction.options.getBoolean('persist') || false;
+        const untilDateStr = interaction.options.getString('until_date');
+
+        // Parse date if provided
+        let untilSnowflake = null;
+        if (untilDateStr) {
+            try {
+                untilSnowflake = parseDateToSnowflake(untilDateStr);
+            } catch (error) {
+                return await interaction.reply({
+                    content: `Invalid date: ${error.message}`,
+                    ephemeral: true
+                });
+            }
+        }
+
+        // Date-based scanning requires either a specific channel or persist mode
+        if (untilSnowflake && !specificChannel && !persist) {
+            return await interaction.reply({
+                content: 'Date-based scanning requires either a specific channel or persist mode.\n' +
+                        'Please specify a channel with `channel:#channel-name` or use `persist:true`.',
+                ephemeral: true
+            });
+        }
+
+        // Date-based + persist only works with a specific channel
+        if (untilSnowflake && persist && !specificChannel) {
+            return await interaction.reply({
+                content: 'Date-based persistent scanning only works with a specific channel.\n' +
+                        'Please specify a channel with `channel:#channel-name`.',
+                ephemeral: true
+            });
+        }
 
         // Persist mode only works with a specific channel (not multi-channel scans)
         if (persist && !specificChannel) {
@@ -458,6 +510,9 @@ client.on('interactionCreate', async (interaction) => {
         } else {
             initialMsg += ' across all channels';
         }
+        if (untilSnowflake) {
+            initialMsg += ` until ${untilDateStr}`;
+        }
         if (persist) {
             initialMsg += '\n_Persistent mode: Stats will be saved and continued from your last scan_';
         }
@@ -485,7 +540,8 @@ client.on('interactionCreate', async (interaction) => {
                     interaction.guild,
                     batchSize,
                     specificChannel,
-                    persist
+                    persist,
+                    untilSnowflake
                 );
 
                 allResults = results;

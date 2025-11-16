@@ -53,6 +53,12 @@ const commands = [
                 description: 'Save results and continue from last scan (default: false)',
                 required: false,
             },
+            {
+                name: 'until_date',
+                type: ApplicationCommandOptionType.String,
+                description: 'Scan until this date (YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY)',
+                required: false,
+            },
         ],
     },
 ];
