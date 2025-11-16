@@ -50,7 +50,7 @@ const commands = [
             {
                 name: 'persist',
                 type: ApplicationCommandOptionType.Boolean,
-                description: 'Save results and continue from last scan (default: false)',
+                description: 'Save results and scan newer messages on next run (works multi-channel)',
                 required: false,
             },
             {

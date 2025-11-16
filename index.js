@@ -63,7 +63,7 @@ async function saveStats(guildId, stats) {
 }
 
 // Helper function to save checkpoint during scanning
-async function saveCheckpoint(guildId, emoteUsage, totalMessagesScanned, lastMessageId, channelCount) {
+async function saveCheckpoint(guildId, emoteUsage, totalMessagesScanned, lastMessageId, channelCount, oldestMessageId = null) {
     const emoteData = Array.from(emoteUsage.values()).map(e => ({
         name: e.name,
         id: e.id,
@@ -76,6 +76,7 @@ async function saveCheckpoint(guildId, emoteUsage, totalMessagesScanned, lastMes
         lastUpdated: new Date().toISOString(),
         totalMessagesScanned,
         lastMessageId,
+        oldestMessageId, // Track the oldest message ID we've scanned (for multi-channel persist)
         channelCount,
         emoteData
     };
@@ -173,13 +174,21 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     let existingStats = null;
     let lastScannedMessageId = null;
     let previousMessagesScanned = 0;
+    let oldestScannedMessageId = null;
 
     if (persist) {
         existingStats = await loadStats(guild.id);
         if (existingStats) {
             lastScannedMessageId = existingStats.lastMessageId;
+            oldestScannedMessageId = existingStats.oldestMessageId;
             previousMessagesScanned = existingStats.totalMessagesScanned || 0;
-            console.log(`Loaded existing stats: ${previousMessagesScanned} messages, last ID: ${lastScannedMessageId}`);
+            console.log(`Loaded existing stats: ${previousMessagesScanned} messages, oldest ID: ${oldestScannedMessageId}`);
+
+            // If we have an oldest message ID without an until date, use it to avoid re-scanning
+            if (oldestScannedMessageId && !untilSnowflake) {
+                untilSnowflake = oldestScannedMessageId;
+                console.log(`Using previous scan cutoff to avoid re-scanning old messages`);
+            }
         }
     }
 
@@ -219,14 +228,16 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     let totalMessagesScanned = 0;
     let newMessagesScanned = 0;
     let remainingMessages = messagesToScan; // Track total remaining messages across all channels
-    let globalLastMessageId = lastScannedMessageId; // Track the most recent message ID for checkpointing
+    let currentOldestMessageId = oldestScannedMessageId; // Track oldest message across this scan
 
     // Scan messages in each channel
     for (const [channelId, channel] of channels) {
         try {
             console.log(`Fetching messages from #${channel.name}...`);
 
-            let lastMessageId = lastScannedMessageId; // Start from saved position in persist mode
+            // For single-channel persist mode, use saved position
+            // For multi-channel scans, each channel starts fresh (we use date cutoff instead)
+            let lastMessageId = (persist && specificChannel) ? lastScannedMessageId : null;
 
             // Fetch messages in batches of 100 (Discord API limit)
             while (remainingMessages > 0) {
@@ -257,7 +268,11 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
                     totalMessagesScanned = previousMessagesScanned + newMessagesScanned;
                     remainingMessages -= filteredMessages.size;
                     lastMessageId = messages.last().id;
-                    globalLastMessageId = lastMessageId; // Update global tracker for checkpointing
+
+                    // Track the oldest message ID we've seen (for multi-channel persist)
+                    if (!currentOldestMessageId || lastMessageId < currentOldestMessageId) {
+                        currentOldestMessageId = lastMessageId;
+                    }
 
                     // Scan each message for emote usage
                     filteredMessages.forEach(msg => {
@@ -275,7 +290,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     // Save checkpoint every CHECKPOINT_INTERVAL messages when in persist mode
                     if (persist && newMessagesScanned > 0 && newMessagesScanned % CHECKPOINT_INTERVAL === 0) {
-                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, globalLastMessageId, channels.size);
+                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, lastMessageId, channels.size, currentOldestMessageId);
                         console.log(`Checkpoint saved at ${totalMessagesScanned} messages`);
                     }
 
@@ -314,7 +329,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
     // Save final checkpoint if in persist mode
     if (persist && newMessagesScanned > 0) {
-        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, globalLastMessageId, channels.size);
+        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, null, channels.size, currentOldestMessageId);
         console.log(`Final checkpoint saved at ${totalMessagesScanned} messages`);
     }
 
@@ -431,32 +446,6 @@ client.on('interactionCreate', async (interaction) => {
             }
         }
 
-        // Date-based scanning requires either a specific channel or persist mode
-        if (untilSnowflake && !specificChannel && !persist) {
-            return await interaction.reply({
-                content: 'Date-based scanning requires either a specific channel or persist mode.\n' +
-                        'Please specify a channel with `channel:#channel-name` or use `persist:true`.',
-                ephemeral: true
-            });
-        }
-
-        // Date-based + persist only works with a specific channel
-        if (untilSnowflake && persist && !specificChannel) {
-            return await interaction.reply({
-                content: 'Date-based persistent scanning only works with a specific channel.\n' +
-                        'Please specify a channel with `channel:#channel-name`.',
-                ephemeral: true
-            });
-        }
-
-        // Persist mode only works with a specific channel (not multi-channel scans)
-        if (persist && !specificChannel) {
-            return await interaction.reply({
-                content: 'Persist mode only works when scanning a specific channel.\n' +
-                        'Please specify a channel with `channel:#channel-name` or run without `persist:true`.',
-                ephemeral: true
-            });
-        }
 
         // Validate message count limits
         const MAX_TRANSIENT_SCAN = 50000;
