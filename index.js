@@ -426,7 +426,6 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // Get options (with defaults)
-        let messagesToScan = interaction.options.getInteger('messages') || 10000;
         const specificChannel = interaction.options.getChannel('channel');
         const showTop = interaction.options.getInteger('show_top') || 5;
         const minUsage = interaction.options.getInteger('min_usage') ?? 0;
@@ -446,29 +445,39 @@ client.on('interactionCreate', async (interaction) => {
             }
         }
 
+        // If until_date is provided and no message count specified, scan unlimited (up to the date)
+        // Otherwise use the specified message count or default to 10000
+        let messagesToScan;
+        if (untilDateStr && !interaction.options.getInteger('messages')) {
+            messagesToScan = Number.MAX_SAFE_INTEGER; // Effectively unlimited, will stop at date cutoff
+        } else {
+            messagesToScan = interaction.options.getInteger('messages') || 10000;
+        }
+
 
         // Validate message count limits
         const MAX_TRANSIENT_SCAN = 50000;
         const BATCH_SIZE = 50000; // Process in 50k chunks
 
-        // For non-persistent scans, enforce max limit
-        if (!persist && messagesToScan > MAX_TRANSIENT_SCAN) {
+        // For non-persistent scans without a date cutoff, enforce max limit
+        if (!persist && !untilDateStr && messagesToScan > MAX_TRANSIENT_SCAN) {
             return await interaction.reply({
                 content: `Transient scans are limited to ${MAX_TRANSIENT_SCAN.toLocaleString()} messages.\n` +
-                        `Use \`persist:true\` with a specific channel to scan more messages.`,
+                        `Use \`persist:true\` or \`until_date\` to scan more messages.`,
                 ephemeral: true
             });
         }
 
-        // Permission check for large scans (>20k messages)
-        if (messagesToScan > 20000) {
+        // Permission check for large scans (>20k messages) - skip for date-based scans
+        if (messagesToScan > 20000 && !untilDateStr) {
             const member = interaction.member;
             const hasPermission = member.permissions.has(PermissionFlagsBits.ManageGuild) ||
                                 member.permissions.has(PermissionFlagsBits.Administrator);
 
             if (!hasPermission) {
                 return await interaction.reply({
-                    content: 'Scanning more than 20,000 messages requires "Manage Server" permission to prevent abuse.',
+                    content: 'Scanning more than 20,000 messages requires "Manage Server" permission to prevent abuse.\n' +
+                            'Alternatively, use `until_date` to scan up to a specific date.',
                     ephemeral: true
                 });
             }
@@ -488,7 +497,9 @@ client.on('interactionCreate', async (interaction) => {
         const totalBatches = persist ? Math.ceil(messagesToScan / BATCH_SIZE) : 1;
         const isBatchedScan = totalBatches > 1;
 
-        if (isBatchedScan) {
+        if (untilDateStr && messagesToScan === Number.MAX_SAFE_INTEGER) {
+            initialMsg += `Scanning all messages until ${untilDateStr}`;
+        } else if (isBatchedScan) {
             initialMsg += `Scanning ${messagesToScan.toLocaleString()} messages in ${totalBatches} batches`;
         } else {
             initialMsg += `Scanning up to ${messagesToScan.toLocaleString()} messages`;
@@ -499,7 +510,7 @@ client.on('interactionCreate', async (interaction) => {
         } else {
             initialMsg += ' across all channels';
         }
-        if (untilSnowflake) {
+        if (untilSnowflake && messagesToScan !== Number.MAX_SAFE_INTEGER) {
             initialMsg += ` until ${untilDateStr}`;
         }
         if (persist) {

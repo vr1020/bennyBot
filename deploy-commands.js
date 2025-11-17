@@ -21,7 +21,7 @@ const commands = [
             {
                 name: 'messages',
                 type: ApplicationCommandOptionType.Integer,
-                description: 'Number of messages to scan (default: 10000, no max with persist:true)',
+                description: 'Number of messages to scan (default: 10000, omit with until_date for unlimited)',
                 required: false,
                 min_value: 100,
             },
@@ -56,7 +56,7 @@ const commands = [
             {
                 name: 'until_date',
                 type: ApplicationCommandOptionType.String,
-                description: 'Scan until this date (YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY)',
+                description: 'Scan all messages until this date (YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY)',
                 required: false,
             },
         ],
