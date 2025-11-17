@@ -223,6 +223,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     let newMessagesScanned = 0;
     let remainingMessages = messagesToScan; // Track total remaining messages across all channels
     let currentOldestMessageId = oldestScannedMessageId; // Track oldest message across this scan
+    let finalLastMessageId = lastScannedMessageId; // Track the last message ID for single-channel persistence
 
     // Scan messages in each channel
     for (const [channelId, channel] of channels) {
@@ -263,6 +264,11 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
                     remainingMessages -= filteredMessages.size;
                     lastMessageId = messages.last().id;
 
+                    // Track the last message ID to resume single-channel persistent scan
+                    if (specificChannel) {
+                        finalLastMessageId = lastMessageId;
+                    }
+
                     // Track the oldest message ID we've seen (for multi-channel persist)
                     if (!currentOldestMessageId || lastMessageId < currentOldestMessageId) {
                         currentOldestMessageId = lastMessageId;
@@ -284,7 +290,10 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     // Save checkpoint every CHECKPOINT_INTERVAL messages when in persist mode
                     if (persist && newMessagesScanned > 0 && newMessagesScanned % CHECKPOINT_INTERVAL === 0) {
-                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, lastMessageId, channels.size, currentOldestMessageId);
+                        // For single-channel persist, save the actual lastMessageId to resume from
+                        // For multi-channel persist, save null (we use oldestMessageId cutoff instead)
+                        const checkpointLastMessageId = specificChannel ? lastMessageId : null;
+                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, checkpointLastMessageId, channels.size, currentOldestMessageId);
                         console.log(`Checkpoint saved at ${totalMessagesScanned} messages`);
                     }
 
@@ -323,7 +332,10 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
     // Save final checkpoint if in persist mode
     if (persist && newMessagesScanned > 0) {
-        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, null, channels.size, currentOldestMessageId);
+        // For single-channel persist, save the last message ID to resume from that point
+        // For multi-channel persist, save null (we rely on oldestMessageId cutoff instead)
+        const savedLastMessageId = specificChannel ? finalLastMessageId : null;
+        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, savedLastMessageId, channels.size, currentOldestMessageId);
         console.log(`Final checkpoint saved at ${totalMessagesScanned} messages`);
     }
 
