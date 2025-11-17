@@ -63,7 +63,7 @@ async function saveStats(guildId, stats) {
 }
 
 // Helper function to save checkpoint during scanning
-async function saveCheckpoint(guildId, emoteUsage, totalMessagesScanned, lastMessageId, channelCount) {
+async function saveCheckpoint(guildId, emoteUsage, totalMessagesScanned, lastMessageId, channelCount, oldestMessageId = null) {
     const emoteData = Array.from(emoteUsage.values()).map(e => ({
         name: e.name,
         id: e.id,
@@ -76,6 +76,7 @@ async function saveCheckpoint(guildId, emoteUsage, totalMessagesScanned, lastMes
         lastUpdated: new Date().toISOString(),
         totalMessagesScanned,
         lastMessageId,
+        oldestMessageId, // Track the oldest message ID we've scanned (for multi-channel persist)
         channelCount,
         emoteData
     };
@@ -99,9 +100,71 @@ async function deleteStats(guildId) {
     }
 }
 
+// Helper function to parse date string to Discord snowflake ID
+function parseDateToSnowflake(dateString) {
+    // Support multiple date formats: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY
+    let dateMatch;
+    let year, month, day;
+
+    // Try YYYY-MM-DD format first
+    dateMatch = dateString.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (dateMatch) {
+        [, year, month, day] = dateMatch;
+    } else {
+        // Try DD/MM/YYYY or DD-MM-YYYY format
+        dateMatch = dateString.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+        if (dateMatch) {
+            [, day, month, year] = dateMatch;
+        }
+    }
+
+    if (!dateMatch) {
+        throw new Error('Invalid date format. Use YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY');
+    }
+
+    year = parseInt(year, 10);
+    month = parseInt(month, 10);
+    day = parseInt(day, 10);
+
+    if (month < 1 || month > 12) {
+        throw new Error('Month must be between 1 and 12');
+    }
+    if (day < 1 || day > 31) {
+        throw new Error('Day must be between 1 and 31');
+    }
+
+    const date = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+
+    // Validate
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+        throw new Error('Invalid date (day does not exist in that month)');
+    }
+
+    // Convert to Discord snowflake
+    // Discord epoch: January 1, 2015 00:00:00 UTC
+    // e.g. Convert the date to a snowflake that represents "the earliest message ID that could exist on Jan 1, 2024"
+    const DISCORD_EPOCH = 1420070400000;
+    const timestamp = date.getTime() - DISCORD_EPOCH;
+
+    if (timestamp < 0) {
+        throw new Error('Date must be after January 1, 2015 (Discord launch date)');
+    }
+
+    // Snowflake format: timestamp (ms since Discord epoch) * 2^22
+    // Multiplying by 4194304 (2^22) places the timestamp in bits 63-22,
+    // with the lower 22 bits set to 0, giving us the earliest possible
+    // snowflake ID for that timestamp
+    const snowflake = (BigInt(timestamp) * 4194304n).toString();
+
+    return snowflake;
+}
+
 // Helper function to analyze emote usage
-async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null, persist = false) {
+async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel = null, persist = false, untilSnowflake = null) {
     console.log('Starting emote analysis...');
+
+    // Determine if this is a date-based scan
+    const isDateBased = untilSnowflake !== null;
 
     // Get all custom emotes from the server
     const guildEmotes = guild.emojis.cache;
@@ -111,13 +174,21 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     let existingStats = null;
     let lastScannedMessageId = null;
     let previousMessagesScanned = 0;
+    let oldestScannedMessageId = null;
 
     if (persist) {
         existingStats = await loadStats(guild.id);
         if (existingStats) {
             lastScannedMessageId = existingStats.lastMessageId;
+            oldestScannedMessageId = existingStats.oldestMessageId;
             previousMessagesScanned = existingStats.totalMessagesScanned || 0;
-            console.log(`Loaded existing stats: ${previousMessagesScanned} messages, last ID: ${lastScannedMessageId}`);
+            console.log(`Loaded existing stats: ${previousMessagesScanned} messages, oldest ID: ${oldestScannedMessageId}`);
+
+            // If we have an oldest message ID without an until date, use it to avoid re-scanning
+            if (oldestScannedMessageId && !untilSnowflake) {
+                untilSnowflake = oldestScannedMessageId;
+                console.log(`Using previous scan cutoff to avoid re-scanning old messages`);
+            }
         }
     }
 
@@ -157,13 +228,16 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     let totalMessagesScanned = 0;
     let newMessagesScanned = 0;
     let remainingMessages = messagesToScan; // Track total remaining messages across all channels
+    let currentOldestMessageId = oldestScannedMessageId; // Track oldest message across this scan
 
     // Scan messages in each channel
     for (const [channelId, channel] of channels) {
         try {
             console.log(`Fetching messages from #${channel.name}...`);
 
-            let lastMessageId = null; // Each channel has its own message history
+            // For single-channel persist mode, use saved position
+            // For multi-channel scans, each channel starts fresh (we use date cutoff instead)
+            let lastMessageId = (persist && specificChannel) ? lastScannedMessageId : null;
 
             // Fetch messages in batches of 100 (Discord API limit)
             while (remainingMessages > 0) {
@@ -179,13 +253,29 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     if (messages.size === 0) break; // No more messages in channel
 
-                    newMessagesScanned += messages.size;
+                    // if date based scan filter by snowflake time
+                    let filteredMessages = messages;
+                    if (isDateBased) {
+                        filteredMessages = messages.filter(msg => msg.id >= untilSnowflake);
+
+                        if (filteredMessages.size === 0) {
+                            console.log(`Reached cutoff date in #${channel.name}`);
+                            break;
+                        }
+                    }
+
+                    newMessagesScanned += filteredMessages.size;
                     totalMessagesScanned = previousMessagesScanned + newMessagesScanned;
-                    remainingMessages -= messages.size;
+                    remainingMessages -= filteredMessages.size;
                     lastMessageId = messages.last().id;
 
+                    // Track the oldest message ID we've seen (for multi-channel persist)
+                    if (!currentOldestMessageId || lastMessageId < currentOldestMessageId) {
+                        currentOldestMessageId = lastMessageId;
+                    }
+
                     // Scan each message for emote usage
-                    messages.forEach(msg => {
+                    filteredMessages.forEach(msg => {
                         // Custom emote format: <:emoteName:emoteId> or <a:emoteName:emoteId> for animated
                         const emoteRegex = /<a?:(\w+):(\d+)>/g;
                         let match;
@@ -200,12 +290,18 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     // Save checkpoint every CHECKPOINT_INTERVAL messages when in persist mode
                     if (persist && newMessagesScanned > 0 && newMessagesScanned % CHECKPOINT_INTERVAL === 0) {
-                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, lastMessageId, channels.size);
+                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, lastMessageId, channels.size, currentOldestMessageId);
                         console.log(`Checkpoint saved at ${totalMessagesScanned} messages`);
                     }
 
                     // If we got fewer messages than requested, we've reached the end
                     if (messages.size < fetchLimit) break;
+
+                    // For date-based scans, if we got messages older than the cutoff, we're done
+                    if (isDateBased && filteredMessages.size < messages.size) {
+                        console.log(`Reached cutoff date in #${channel.name} (partial batch)`);
+                        break;
+                    }
 
                     // Small delay to avoid hitting rate limits too hard (only if fetching more)
                     if (remainingMessages > 0) {
@@ -233,7 +329,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
     // Save final checkpoint if in persist mode
     if (persist && newMessagesScanned > 0) {
-        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, null, channels.size);
+        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, null, channels.size, currentOldestMessageId);
         console.log(`Final checkpoint saved at ${totalMessagesScanned} messages`);
     }
 
@@ -330,43 +426,58 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // Get options (with defaults)
-        let messagesToScan = interaction.options.getInteger('messages') || 10000;
         const specificChannel = interaction.options.getChannel('channel');
         const showTop = interaction.options.getInteger('show_top') || 5;
         const minUsage = interaction.options.getInteger('min_usage') ?? 0;
         let persist = interaction.options.getBoolean('persist') || false;
+        const untilDateStr = interaction.options.getString('until_date');
 
-        // Persist mode only works with a specific channel (not multi-channel scans)
-        if (persist && !specificChannel) {
-            return await interaction.reply({
-                content: 'Persist mode only works when scanning a specific channel.\n' +
-                        'Please specify a channel with `channel:#channel-name` or run without `persist:true`.',
-                ephemeral: true
-            });
+        // Parse date if provided
+        let untilSnowflake = null;
+        if (untilDateStr) {
+            try {
+                untilSnowflake = parseDateToSnowflake(untilDateStr);
+            } catch (error) {
+                return await interaction.reply({
+                    content: `Invalid date: ${error.message}`,
+                    ephemeral: true
+                });
+            }
         }
+
+        // If until_date is provided and no message count specified, scan unlimited (up to the date)
+        // Otherwise use the specified message count or default to 10000
+        let messagesToScan;
+        if (untilDateStr && !interaction.options.getInteger('messages')) {
+            messagesToScan = Number.MAX_SAFE_INTEGER; // Effectively unlimited, will stop at date cutoff
+        } else {
+            messagesToScan = interaction.options.getInteger('messages') || 10000;
+        }
+
 
         // Validate message count limits
         const MAX_TRANSIENT_SCAN = 50000;
         const BATCH_SIZE = 50000; // Process in 50k chunks
 
-        // For non-persistent scans, enforce max limit
-        if (!persist && messagesToScan > MAX_TRANSIENT_SCAN) {
+        // For non-persistent scans without a date cutoff, enforce max limit
+        if (!persist && !untilDateStr && messagesToScan > MAX_TRANSIENT_SCAN) {
             return await interaction.reply({
                 content: `Transient scans are limited to ${MAX_TRANSIENT_SCAN.toLocaleString()} messages.\n` +
-                        `Use \`persist:true\` with a specific channel to scan more messages.`,
+                        `Use \`persist:true\` or \`until_date\` to scan more messages.`,
                 ephemeral: true
             });
         }
 
-        // Permission check for large scans (>20k messages)
-        if (messagesToScan > 20000) {
+        // Permission check for large scans (>20k messages) - skip for date-based scans
+        if (messagesToScan > 20000 && !untilDateStr) {
             const member = interaction.member;
             const hasPermission = member.permissions.has(PermissionFlagsBits.ManageGuild) ||
                                 member.permissions.has(PermissionFlagsBits.Administrator);
 
             if (!hasPermission) {
                 return await interaction.reply({
-                    content: 'Scanning more than 20,000 messages requires "Manage Server" permission to prevent abuse.',
+                    content: 'Scanning more than 20,000 messages requires "Manage Server" permission to prevent abuse.\n' +
+                            'Alternatively, use `until_date` to scan up to a specific date.',
                     ephemeral: true
                 });
             }
@@ -386,7 +497,9 @@ client.on('interactionCreate', async (interaction) => {
         const totalBatches = persist ? Math.ceil(messagesToScan / BATCH_SIZE) : 1;
         const isBatchedScan = totalBatches > 1;
 
-        if (isBatchedScan) {
+        if (untilDateStr && messagesToScan === Number.MAX_SAFE_INTEGER) {
+            initialMsg += `Scanning all messages until ${untilDateStr}`;
+        } else if (isBatchedScan) {
             initialMsg += `Scanning ${messagesToScan.toLocaleString()} messages in ${totalBatches} batches`;
         } else {
             initialMsg += `Scanning up to ${messagesToScan.toLocaleString()} messages`;
@@ -396,6 +509,9 @@ client.on('interactionCreate', async (interaction) => {
             initialMsg += ` in ${specificChannel}`;
         } else {
             initialMsg += ' across all channels';
+        }
+        if (untilSnowflake && messagesToScan !== Number.MAX_SAFE_INTEGER) {
+            initialMsg += ` until ${untilDateStr}`;
         }
         if (persist) {
             initialMsg += '\n_Persistent mode: Stats will be saved and continued from your last scan_';
@@ -424,7 +540,8 @@ client.on('interactionCreate', async (interaction) => {
                     interaction.guild,
                     batchSize,
                     specificChannel,
-                    persist
+                    persist,
+                    untilSnowflake
                 );
 
                 allResults = results;
