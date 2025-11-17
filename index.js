@@ -261,6 +261,8 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     newMessagesScanned += filteredMessages.size;
                     totalMessagesScanned = previousMessagesScanned + newMessagesScanned;
+                    // Decrement by filtered count, not fetched count
+                    // This ensures "scan 10k messages" means 10k messages after date cutoff
                     remainingMessages -= filteredMessages.size;
                     lastMessageId = messages.last().id;
 
@@ -500,10 +502,12 @@ client.on('interactionCreate', async (interaction) => {
         let initialMsg = 'Analyzing emote usage... This may take a moment!\n';
 
         // Calculate batches if this is a large persistent scan
-        const totalBatches = persist ? Math.ceil(messagesToScan / BATCH_SIZE) : 1;
+        // For unlimited date scans, don't calculate batch count (it would be huge)
+        const isUnlimitedDateScan = untilDateStr && messagesToScan === Number.MAX_SAFE_INTEGER;
+        const totalBatches = (!isUnlimitedDateScan && persist) ? Math.ceil(messagesToScan / BATCH_SIZE) : 1;
         const isBatchedScan = totalBatches > 1;
 
-        if (untilDateStr && messagesToScan === Number.MAX_SAFE_INTEGER) {
+        if (isUnlimitedDateScan) {
             initialMsg += `Scanning all messages until ${untilDateStr}`;
         } else if (isBatchedScan) {
             initialMsg += `Scanning ${messagesToScan.toLocaleString()} messages in ${totalBatches} batches`;
