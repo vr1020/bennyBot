@@ -183,12 +183,6 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
             oldestScannedMessageId = existingStats.oldestMessageId;
             previousMessagesScanned = existingStats.totalMessagesScanned || 0;
             console.log(`Loaded existing stats: ${previousMessagesScanned} messages, oldest ID: ${oldestScannedMessageId}`);
-
-            // If we have an oldest message ID without an until date, use it to avoid re-scanning
-            if (oldestScannedMessageId && !untilSnowflake) {
-                untilSnowflake = oldestScannedMessageId;
-                console.log(`Using previous scan cutoff to avoid re-scanning old messages`);
-            }
         }
     }
 
