@@ -183,12 +183,6 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
             oldestScannedMessageId = existingStats.oldestMessageId;
             previousMessagesScanned = existingStats.totalMessagesScanned || 0;
             console.log(`Loaded existing stats: ${previousMessagesScanned} messages, oldest ID: ${oldestScannedMessageId}`);
-
-            // If we have an oldest message ID without an until date, use it to avoid re-scanning
-            if (oldestScannedMessageId && !untilSnowflake) {
-                untilSnowflake = oldestScannedMessageId;
-                console.log(`Using previous scan cutoff to avoid re-scanning old messages`);
-            }
         }
     }
 
@@ -229,6 +223,7 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
     let newMessagesScanned = 0;
     let remainingMessages = messagesToScan; // Track total remaining messages across all channels
     let currentOldestMessageId = oldestScannedMessageId; // Track oldest message across this scan
+    let finalLastMessageId = lastScannedMessageId; // Track the last message ID for single-channel persistence
 
     // Scan messages in each channel
     for (const [channelId, channel] of channels) {
@@ -266,8 +261,15 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     newMessagesScanned += filteredMessages.size;
                     totalMessagesScanned = previousMessagesScanned + newMessagesScanned;
+                    // Decrement by filtered count, not fetched count
+                    // This ensures "scan 10k messages" means 10k messages after date cutoff
                     remainingMessages -= filteredMessages.size;
                     lastMessageId = messages.last().id;
+
+                    // Track the last message ID to resume single-channel persistent scan
+                    if (specificChannel) {
+                        finalLastMessageId = lastMessageId;
+                    }
 
                     // Track the oldest message ID we've seen (for multi-channel persist)
                     if (!currentOldestMessageId || lastMessageId < currentOldestMessageId) {
@@ -290,7 +292,10 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
                     // Save checkpoint every CHECKPOINT_INTERVAL messages when in persist mode
                     if (persist && newMessagesScanned > 0 && newMessagesScanned % CHECKPOINT_INTERVAL === 0) {
-                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, lastMessageId, channels.size, currentOldestMessageId);
+                        // For single-channel persist, save the actual lastMessageId to resume from
+                        // For multi-channel persist, save null (we use oldestMessageId cutoff instead)
+                        const checkpointLastMessageId = specificChannel ? lastMessageId : null;
+                        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, checkpointLastMessageId, channels.size, currentOldestMessageId);
                         console.log(`Checkpoint saved at ${totalMessagesScanned} messages`);
                     }
 
@@ -329,7 +334,10 @@ async function analyzeEmoteUsage(guild, messagesToScan = 10000, specificChannel 
 
     // Save final checkpoint if in persist mode
     if (persist && newMessagesScanned > 0) {
-        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, null, channels.size, currentOldestMessageId);
+        // For single-channel persist, save the last message ID to resume from that point
+        // For multi-channel persist, save null (we rely on oldestMessageId cutoff instead)
+        const savedLastMessageId = specificChannel ? finalLastMessageId : null;
+        await saveCheckpoint(guild.id, emoteUsage, totalMessagesScanned, savedLastMessageId, channels.size, currentOldestMessageId);
         console.log(`Final checkpoint saved at ${totalMessagesScanned} messages`);
     }
 
@@ -494,10 +502,12 @@ client.on('interactionCreate', async (interaction) => {
         let initialMsg = 'Analyzing emote usage... This may take a moment!\n';
 
         // Calculate batches if this is a large persistent scan
-        const totalBatches = persist ? Math.ceil(messagesToScan / BATCH_SIZE) : 1;
+        // For unlimited date scans, don't calculate batch count (it would be huge)
+        const isUnlimitedDateScan = untilDateStr && messagesToScan === Number.MAX_SAFE_INTEGER;
+        const totalBatches = (!isUnlimitedDateScan && persist) ? Math.ceil(messagesToScan / BATCH_SIZE) : 1;
         const isBatchedScan = totalBatches > 1;
 
-        if (untilDateStr && messagesToScan === Number.MAX_SAFE_INTEGER) {
+        if (isUnlimitedDateScan) {
             initialMsg += `Scanning all messages until ${untilDateStr}`;
         } else if (isBatchedScan) {
             initialMsg += `Scanning ${messagesToScan.toLocaleString()} messages in ${totalBatches} batches`;
