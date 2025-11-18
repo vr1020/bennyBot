@@ -15,6 +15,18 @@ const commands = [
         description: 'Clear saved emote statistics and start fresh',
     },
     {
+        name: 'pin-message',
+        description: 'Pin a message to save it for later reference',
+        options: [
+            {
+                name: 'message_id',
+                type: ApplicationCommandOptionType.String,
+                description: 'ID of the message to pin ',
+                required: false,
+            },
+        ],
+    },
+    {
         name: 'emote-stats',
         description: 'Analyze custom emote usage in the server',
         options: [

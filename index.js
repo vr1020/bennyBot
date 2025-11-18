@@ -24,6 +24,9 @@ const COOLDOWN_TIME = 30000; // 30 seconds between commands per user
 const STATS_DIR = path.join(__dirname, 'emote-stats');
 const CHECKPOINT_INTERVAL = 10000; // Save checkpoint every 10k messages
 
+// Pinned messages configuration
+const PINS_DIR = path.join(__dirname, 'pins');
+
 // Helper function to ensure stats directory exists
 async function ensureStatsDir() {
     try {
@@ -96,6 +99,73 @@ async function deleteStats(guildId) {
             // File doesn't exist, that's fine
             return false;
         }
+        throw error;
+    }
+}
+
+// Helper function to ensure pins directory exists
+async function ensurePinsDir() {
+    try {
+        await fs.mkdir(PINS_DIR, { recursive: true });
+    } catch (error) {
+        console.error('Error creating pins directory:', error);
+    }
+}
+
+// Helper function to get pins file path for a guild
+function getPinsFilePath(guildId) {
+    return path.join(PINS_DIR, `${guildId}.json`);
+}
+
+// Helper function to load existing pins from file
+async function loadPins(guildId) {
+    try {
+        const filePath = getPinsFilePath(guildId);
+        const data = await fs.readFile(filePath, 'utf8');
+        return JSON.parse(data);
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            // File doesn't exist, return empty array
+            return [];
+        }
+        throw error;
+    }
+}
+
+// Helper function to save a pinned message
+async function savePinnedMessage(guildId, messageData) {
+    try {
+        await ensurePinsDir();
+
+        // Load existing pins
+        const pins = await loadPins(guildId);
+
+        // Add new pin with timestamp
+        const pin = {
+            messageId: messageData.id,
+            channelId: messageData.channelId,
+            content: messageData.content,
+            author: {
+                id: messageData.author.id,
+                username: messageData.author.username,
+                tag: messageData.author.tag
+            },
+            timestamp: messageData.createdAt.toISOString(),
+            pinnedAt: new Date().toISOString(),
+            pinnedBy: messageData.pinnedBy,
+            messageUrl: messageData.url
+        };
+
+        pins.push(pin);
+
+        // Save back to file
+        const filePath = getPinsFilePath(guildId);
+        await fs.writeFile(filePath, JSON.stringify(pins, null, 2), 'utf8');
+
+        console.log(`Saved pinned message ${messageData.id} for guild ${guildId}`);
+        return pin;
+    } catch (error) {
+        console.error('Error saving pinned message:', error);
         throw error;
     }
 }
