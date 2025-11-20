@@ -431,8 +431,68 @@ client.once('ready', () => {
     console.log(`Bot is ready and online!`);
 });
 
-// Listen for slash commands
 client.on('interactionCreate', async (interaction) => {
+    if (interaction.isMessageContextMenuCommand()) {
+        if (interaction.commandName === 'Pin Message') {
+            const guildId = interaction.guild.id;
+            const message = interaction.targetMessage;
+
+            try {
+                // Check if message is already pinned
+                const existingPins = await loadPins(guildId);
+                const alreadyPinned = existingPins.some(pin => pin.messageId === message.id);
+
+                if (alreadyPinned) {
+                    return await interaction.reply({
+                        content: 'This message is already pinned!',
+                        ephemeral: true
+                    });
+                }
+
+                // Save the pinned message
+                const pin = await savePinnedMessage(guildId, {
+                    id: message.id,
+                    channelId: message.channel.id,
+                    content: message.content,
+                    author: message.author,
+                    createdAt: message.createdAt,
+                    pinnedBy: {
+                        id: interaction.user.id,
+                        username: interaction.user.username,
+                        tag: interaction.user.tag
+                    },
+                    url: message.url
+                });
+
+                // Build response
+                let response = `**Message Pinned**\n`;
+                response += `From: <@${pin.author.id}>\n`;
+                response += `Date: <t:${Math.floor(new Date(pin.timestamp).getTime() / 1000)}:f>\n`;
+                response += `Link: ${pin.messageUrl}\n\n`;
+
+                // Show preview of content (truncated if too long)
+                if (pin.content) {
+                    const preview = pin.content.length > 200
+                        ? pin.content.substring(0, 200) + '...'
+                        : pin.content;
+                    response += `> ${preview.replace(/\n/g, '\n> ')}`;
+                } else {
+                    response += `> *(No text content - may contain embeds or attachments)*`;
+                }
+
+                await interaction.reply(response);
+            } catch (error) {
+                console.error('Error pinning message:', error);
+                await interaction.reply({
+                    content: 'Error pinning message. Please try again.',
+                    ephemeral: true
+                });
+            }
+        }
+        return;
+    }
+
+    // Handle slash commands
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;

@@ -1,4 +1,4 @@
-const { REST, Routes, ApplicationCommandOptionType, ChannelType } = require('discord.js');
+const { REST, Routes, ApplicationCommandOptionType, ApplicationCommandType, ChannelType } = require('discord.js');
 const config = require('./config.js');
 
 const commands = [
@@ -15,16 +15,8 @@ const commands = [
         description: 'Clear saved emote statistics and start fresh',
     },
     {
-        name: 'pin-message',
-        description: 'Pin a message to save it for later reference',
-        options: [
-            {
-                name: 'message_id',
-                type: ApplicationCommandOptionType.String,
-                description: 'ID of the message to pin ',
-                required: false,
-            },
-        ],
+        name: 'Pin Message',
+        type: ApplicationCommandType.Message,
     },
     {
         name: 'emote-stats',
